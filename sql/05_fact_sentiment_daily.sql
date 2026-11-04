@@ -32,9 +32,11 @@ SELECT
     r.ret_prev,
     r.ret_same,
     r.ret_next,
+    r.ret_2d,
     r.abn_prev,
     r.abn_same,
-    r.abn_next
+    r.abn_next,
+    r.abn_2d
 FROM daily d
 JOIN sentiment.daily_returns r
   ON r.ticker = d.ticker

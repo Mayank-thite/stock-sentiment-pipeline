@@ -61,6 +61,9 @@ def test_returns(built):
     assert a.ret_same == pytest.approx(0.10)
     assert a.ret_next == pytest.approx(-0.10)
     assert r[("AAA", "2023-01-09")].ret_prev == pytest.approx(0.10)
+    # two day window from close(t-1) to close(t+1): 100 -> 99
+    assert a.ret_2d == pytest.approx(99 / 100 - 1)
+    assert r[("AAA", "2023-01-05")].ret_2d is None
     assert r[("AAA", "2023-01-05")].ret_same is None
     assert r[("AAA", "2023-01-10")].ret_next is None
     # abnormal = own return minus the average across tickers that day

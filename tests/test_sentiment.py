@@ -23,3 +23,9 @@ def test_label_thresholds():
     assert label(-0.05) == "negative"
     assert label(0.049) == "neutral"
     assert label(0.0) == "neutral"
+
+
+def test_shares_is_not_positive():
+    # plain VADER scores this positive because of "shares"
+    assert score_headline("Tesla shares fall after delivery numbers")["compound"] <= 0
+    assert score_headline("Apple shares")["compound"] == 0.0
