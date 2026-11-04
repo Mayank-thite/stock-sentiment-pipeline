@@ -1,0 +1,1 @@
+"""Stock headline sentiment pipeline."""
