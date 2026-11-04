@@ -7,6 +7,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 KAFKA_TOPIC = "headlines"
+
+
+def kafka_topic(sample: bool) -> str:
+    """Separate topics so a sample run never mixes into a full run."""
+    return f"{KAFKA_TOPIC}_sample" if sample else KAFKA_TOPIC
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "localhost:9092")
 KAFKA_SPARK_PACKAGE = "org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1"
 

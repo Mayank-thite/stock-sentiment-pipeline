@@ -1,6 +1,6 @@
 """Spark Structured Streaming job: read headlines, score them, write Parquet.
 
-Source is either Kafka (topic `headlines`) or the local landing folder the
+Source is either Kafka (topic `headlines`, or `headlines_sample`) or the local landing folder the
 producer writes to. Both use trigger(availableNow=True), so the job processes
 everything that is waiting and then stops. Drop that trigger for an always-on
 job.
@@ -16,7 +16,7 @@ from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-from pipeline.config import KAFKA_BOOTSTRAP, KAFKA_TOPIC, get_paths, spark_session
+from pipeline.config import KAFKA_BOOTSTRAP, get_paths, kafka_topic, spark_session
 
 HEADLINE_SCHEMA = T.StructType(
     [
@@ -47,12 +47,12 @@ def _score(text):
 score_udf = F.udf(_score, SCORE_SCHEMA)
 
 
-def read_stream(spark: SparkSession, source: str, paths, bootstrap: str) -> DataFrame:
+def read_stream(spark: SparkSession, source: str, paths, bootstrap: str, topic: str = None) -> DataFrame:
     if source == "kafka":
         raw = (
             spark.readStream.format("kafka")
             .option("kafka.bootstrap.servers", bootstrap)
-            .option("subscribe", KAFKA_TOPIC)
+            .option("subscribe", topic or kafka_topic(False))
             .option("startingOffsets", "earliest")
             .load()
         )
@@ -94,7 +94,7 @@ def run(source: str, sample: bool, bootstrap: str = KAFKA_BOOTSTRAP, spark=None)
             shutil.rmtree(p)
     spark = spark or spark_session("score-headlines", kafka=(source == "kafka"))
     query = (
-        add_scores(read_stream(spark, source, paths, bootstrap))
+        add_scores(read_stream(spark, source, paths, bootstrap, kafka_topic(sample)))
         .writeStream.format("parquet")
         .option("path", str(out))
         .option("checkpointLocation", str(paths.checkpoint))

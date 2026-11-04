@@ -1,7 +1,8 @@
 """Replay historical headlines as a stream.
 
 Two sinks:
-  kafka  sends one JSON message per headline to the `headlines` topic.
+  kafka  sends one JSON message per headline to the `headlines` topic
+         (`headlines_sample` with --sample).
   files  writes JSON lines micro-batches into a landing folder. Spark reads that
          folder as a streaming file source, so the pipeline runs without Docker.
 
@@ -17,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from pipeline.config import KAFKA_BOOTSTRAP, KAFKA_TOPIC, get_paths
+from pipeline.config import KAFKA_BOOTSTRAP, get_paths, kafka_topic
 from pipeline.ingest import load_news
 
 
@@ -93,8 +94,9 @@ def main(argv=None):
     if args.limit:
         df = df.head(args.limit)
     if args.sink == "kafka":
-        n = replay_to_kafka(df, args.bootstrap, KAFKA_TOPIC, args.rate)
-        print(f"producer: sent {n} headlines to Kafka topic '{KAFKA_TOPIC}' at {args.bootstrap}")
+        topic = kafka_topic(args.sample)
+        n = replay_to_kafka(df, args.bootstrap, topic, args.rate)
+        print(f"producer: sent {n} headlines to Kafka topic '{topic}' at {args.bootstrap}")
     else:
         n = replay_to_files(df, paths.landing)
         print(f"producer: wrote {n} headlines to {paths.landing}")
