@@ -1,4 +1,5 @@
 """Paths and settings shared by every step."""
+import logging
 import os
 import sys
 from dataclasses import dataclass
@@ -7,16 +8,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 KAFKA_TOPIC = "headlines"
-
-
-def kafka_topic(sample: bool) -> str:
-    """Separate topics so a sample run never mixes into a full run."""
-    return f"{KAFKA_TOPIC}_sample" if sample else KAFKA_TOPIC
 KAFKA_BOOTSTRAP = os.environ.get("KAFKA_BOOTSTRAP", "localhost:9092")
 KAFKA_SPARK_PACKAGE = "org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1"
 
 # A headline counts as positive or negative when VADER compound is past this.
 LABEL_THRESHOLD = 0.05
+
+# Loughran-McDonald finance word lists. Free for academic use, commercial use
+# needs a license, so it is downloaded by scripts/download_data.py and never committed.
+LM_DICTIONARY = ROOT / "data" / "raw" / "lm_master_dictionary.csv"
+
+# Fama-MacBeth: skip dates with fewer tickers than this, a slope on 3 points is noise.
+FM_MIN_TICKERS_PER_DAY = 10
+# Newey-West lags for the time series of daily slopes (one trading week).
+FM_NEWEY_WEST_LAGS = 5
+
+
+def kafka_topic(sample: bool) -> str:
+    """Separate topics so a sample run never mixes into a full run."""
+    return f"{KAFKA_TOPIC}_sample" if sample else KAFKA_TOPIC
+
+
+def setup_logging(level: int = logging.INFO) -> None:
+    """One log format for every step. Safe to call more than once."""
+    logging.basicConfig(level=level, format="%(asctime)s %(name)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    logging.getLogger("py4j").setLevel(logging.WARNING)
 
 
 @dataclass(frozen=True)
@@ -53,7 +69,7 @@ def get_paths(sample: bool) -> Paths:
     )
 
 
-def spark_session(app_name: str, kafka: bool = False, metastore: Path = None):
+def spark_session(app_name: str, kafka: bool = False, metastore: Path | None = None):
     """Local Spark session. Workers use the same Python as the driver.
 
     Hive support (a local Derby metastore) is always on so the HiveQL DDL in

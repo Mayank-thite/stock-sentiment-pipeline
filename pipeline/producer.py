@@ -12,14 +12,17 @@ Usage:
 """
 import argparse
 import json
+import logging
 import shutil
 import time
 from pathlib import Path
 
 import pandas as pd
 
-from pipeline.config import KAFKA_BOOTSTRAP, get_paths, kafka_topic
+from pipeline.config import KAFKA_BOOTSTRAP, get_paths, kafka_topic, setup_logging
 from pipeline.ingest import load_news
+
+log = logging.getLogger(__name__)
 
 
 def to_messages(df: pd.DataFrame):
@@ -80,7 +83,8 @@ def replay_to_kafka(df: pd.DataFrame, bootstrap: str, topic: str, rate: float) -
     return n
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    setup_logging()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--sink", choices=["kafka", "files"], default="files")
     ap.add_argument("--sample", action="store_true", help="use data/sample instead of data/raw")
@@ -96,10 +100,10 @@ def main(argv=None):
     if args.sink == "kafka":
         topic = kafka_topic(args.sample)
         n = replay_to_kafka(df, args.bootstrap, topic, args.rate)
-        print(f"producer: sent {n} headlines to Kafka topic '{topic}' at {args.bootstrap}")
+        log.info(f"sent {n} headlines to Kafka topic '{topic}' at {args.bootstrap}")
     else:
         n = replay_to_files(df, paths.landing)
-        print(f"producer: wrote {n} headlines to {paths.landing}")
+        log.info(f"wrote {n} headlines to {paths.landing}")
     return n
 
 

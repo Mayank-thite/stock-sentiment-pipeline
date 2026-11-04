@@ -9,15 +9,19 @@ Steps: producer -> Spark streaming scoring -> HiveQL cleaning and joins ->
 analysis -> charts -> Power BI export -> HTML dashboard.
 """
 import argparse
+import logging
 import subprocess
 import sys
 import time
 
 from pipeline import analysis, batch_sql, charts, dashboard, export_powerbi, producer, stream_score
-from pipeline.config import KAFKA_BOOTSTRAP, ROOT, get_paths, spark_session
+from pipeline.config import KAFKA_BOOTSTRAP, ROOT, get_paths, setup_logging, spark_session
+
+log = logging.getLogger(__name__)
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    setup_logging()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--local", action="store_true", help="no Kafka; stream through a local folder (default)")
@@ -52,7 +56,7 @@ def main(argv=None):
     charts.run(args.sample)
     export_powerbi.run(args.sample)
     dashboard.run(args.sample)
-    print(f"run: done in {time.time() - t0:.0f}s")
+    log.info(f"done in {time.time() - t0:.0f}s")
 
 
 if __name__ == "__main__":

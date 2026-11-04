@@ -8,11 +8,14 @@ Usage:
   python -m pipeline.batch_sql [--sample]
 """
 import argparse
+import logging
 import re
 from pathlib import Path
 
-from pipeline.config import LABEL_THRESHOLD, ROOT, get_paths, spark_session
+from pipeline.config import LABEL_THRESHOLD, ROOT, get_paths, setup_logging, spark_session
 from pipeline.ingest import load_prices
+
+log = logging.getLogger(__name__)
 
 SQL_DIR = ROOT / "sql"
 
@@ -39,14 +42,14 @@ def run_sql_files(spark, variables: dict, sql_dir: Path = SQL_DIR) -> None:
     for f in sorted(sql_dir.glob("*.sql")):
         for stmt in split_statements(render(f.read_text(), variables)):
             spark.sql(stmt)
-        print(f"batch_sql: ran {f.name}")
+        log.info(f"ran {f.name}")
 
 
 def run(sample: bool, prices_csv: Path = None, spark=None):
     paths = get_paths(sample)
     spark = spark or spark_session("hive-sql", metastore=paths.work / "metastore")
     n_prices = stage_prices(spark, Path(prices_csv or paths.prices), paths.warehouse)
-    print(f"batch_sql: staged {n_prices} price rows")
+    log.info(f"staged {n_prices} price rows")
     run_sql_files(spark, {"WAREHOUSE": paths.warehouse.as_posix(), "THRESHOLD": LABEL_THRESHOLD})
     fact = spark.table("sentiment.fact_sentiment_daily").orderBy("ticker", "trade_date")
     out = paths.work / "fact_sentiment_daily.parquet"
@@ -59,11 +62,12 @@ def run(sample: bool, prices_csv: Path = None, spark=None):
         "headlines_matched_to_trading_day": len(headlines),
         "fact_rows": fact.count(),
     }
-    print(f"batch_sql: {counts}")
+    log.info(f"{counts}")
     return counts
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    setup_logging()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--sample", action="store_true")
     ap.add_argument("--prices", help="price CSV to use instead of the default")

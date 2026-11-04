@@ -10,13 +10,16 @@ Usage:
   python -m pipeline.stream_score --source kafka [--sample]
 """
 import argparse
+import logging
 import shutil
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
-from pipeline.config import KAFKA_BOOTSTRAP, get_paths, kafka_topic, spark_session
+from pipeline.config import KAFKA_BOOTSTRAP, get_paths, kafka_topic, setup_logging, spark_session
+
+log = logging.getLogger(__name__)
 
 HEADLINE_SCHEMA = T.StructType(
     [
@@ -104,11 +107,12 @@ def run(source: str, sample: bool, bootstrap: str = KAFKA_BOOTSTRAP, spark=None)
     )
     query.awaitTermination()
     n = spark.read.parquet(str(out)).count()
-    print(f"stream_score: scored {n} headlines from {source} into {out}")
+    log.info(f"scored {n} headlines from {source} into {out}")
     return n
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    setup_logging()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--source", choices=["kafka", "files"], default="files")
     ap.add_argument("--sample", action="store_true")

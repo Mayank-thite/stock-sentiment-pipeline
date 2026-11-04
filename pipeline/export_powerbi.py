@@ -10,10 +10,13 @@ Usage:
   python -m pipeline.export_powerbi [--sample]
 """
 import argparse
+import logging
 
 import pandas as pd
 
-from pipeline.config import ROOT, get_paths
+from pipeline.config import ROOT, get_paths, setup_logging
+
+log = logging.getLogger(__name__)
 
 
 def build_star(fact: pd.DataFrame):
@@ -22,7 +25,8 @@ def build_star(fact: pd.DataFrame):
     fact["date_key"] = fact["trade_date"].dt.strftime("%Y%m%d").astype(int)
     fact = fact[
         ["date_key", "ticker", "n_headlines", "avg_compound", "n_positive", "n_negative", "n_neutral",
-         "day_label", "close", "ret_prev", "ret_same", "ret_next", "abn_prev", "abn_same", "abn_next"]
+         "day_label", "close", "ret_prev", "ret_same", "ret_next", "ret_2d",
+         "abn_prev", "abn_same", "abn_next", "abn_2d"]
     ]
 
     dim_ticker = (
@@ -59,11 +63,12 @@ def run(sample: bool):
     for name, df in zip(["fact_sentiment_daily", "dim_ticker", "dim_date"], build_star(fact)):
         df.to_csv(out / f"{name}.csv", index=False, float_format="%.8g")
         df.to_parquet(out / f"{name}.parquet", index=False)
-        print(f"export_powerbi: {name} {len(df)} rows")
+        log.info(f"{name} {len(df)} rows")
     return out
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    setup_logging()
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample", action="store_true")
     run(ap.parse_args(argv).sample)

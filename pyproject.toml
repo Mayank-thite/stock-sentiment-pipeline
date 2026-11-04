@@ -1,0 +1,14 @@
+[tool.ruff]
+line-length = 130
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B905"]  # zip(strict=) adds noise here, the lists are built side by side
+
+[tool.ruff.lint.per-file-ignores]
+# The dashboard is mostly an HTML and CSS template, wrapping it hurts more than it helps.
+"pipeline/dashboard.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

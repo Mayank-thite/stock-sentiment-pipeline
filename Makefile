@@ -1,6 +1,6 @@
 PYTHON ?= .venv/bin/python
 
-.PHONY: setup data prices-api run-local run-sample run-kafka kafka-up kafka-down test powerbi clean
+.PHONY: setup data prices-api run-local run-sample run-kafka kafka-up kafka-down test lint powerbi clean
 
 setup:            ## create the virtualenv and install pinned packages
 	python3 -m venv .venv
@@ -29,6 +29,9 @@ run-kafka: data   ## full pipeline through Kafka (run make kafka-up first)
 
 test:
 	$(PYTHON) -m pytest -q
+
+lint:
+	$(PYTHON) -m ruff check .
 
 powerbi:          ## rebuild the Power BI star schema from the last run
 	$(PYTHON) -m pipeline.export_powerbi

@@ -19,6 +19,7 @@ outputs/price_check.json.
 """
 import argparse
 import json
+import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,8 +27,10 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from pipeline.config import ROOT
+from pipeline.config import ROOT, setup_logging
 from pipeline.ingest import load_prices
+
+log = logging.getLogger(__name__)
 
 URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
 CACHE = ROOT / "data" / "cache" / "prices_api"
@@ -96,14 +99,14 @@ def run(tickers=None, refresh=False):
         try:
             frames.append(get_ticker(t, refresh, session))
         except Exception as e:  # keep going, use the static rows for this one
-            print(f"ingest_prices: {e}; using static rows")
+            log.warning(f"{e}; using static rows")
             fell_back.append(t)
             frames.append(static[static["tic"] == t])
     df = pd.concat(frames, ignore_index=True)
     df = df[(df["date"] >= static["date"].min()) & (df["date"] <= static["date"].max())]
     df.to_csv(OUT, index=False)
     FALLBACK.write_text(json.dumps(fell_back))
-    print(f"ingest_prices: {len(df)} rows for {len(tickers)} tickers -> {OUT} (static fallback: {fell_back})")
+    log.info(f"{len(df)} rows for {len(tickers)} tickers -> {OUT} (static fallback: {fell_back})")
     return df, fell_back
 
 
@@ -127,11 +130,12 @@ def check(api_csv: Path = OUT) -> dict:
     path = ROOT / "outputs" / "price_check.json"
     path.parent.mkdir(exist_ok=True)
     path.write_text(json.dumps(out, indent=2))
-    print(f"ingest_prices check: {out}")
+    log.info("price check %s written to %s", out, path)
     return out
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    setup_logging()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--tickers", nargs="*")
     ap.add_argument("--refresh", action="store_true", help="ignore the cache")
