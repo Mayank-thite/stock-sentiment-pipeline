@@ -1,0 +1,13 @@
+{
+  "matched_rows": 100480,
+  "tickers": 80,
+  "tickers_on_static_fallback": [
+    "ANSS",
+    "EA",
+    "WBA",
+    "WBD"
+  ],
+  "return_correlation": 0.999917456180072,
+  "median_abs_diff": 5.530188068592068e-08,
+  "share_abs_diff_below_1bp": 0.9997412420382166
+}

@@ -1,0 +1,79 @@
+// DAX measures for the stock sentiment dashboard.
+// Tables: fact_sentiment_daily, dim_ticker, dim_date
+// Relationships: fact_sentiment_daily[date_key] -> dim_date[date_key]
+//                fact_sentiment_daily[ticker]   -> dim_ticker[ticker]
+
+News Days = COUNTROWS ( fact_sentiment_daily )
+
+Headlines = SUM ( fact_sentiment_daily[n_headlines] )
+
+Avg Sentiment = AVERAGE ( fact_sentiment_daily[avg_compound] )
+
+Headline Weighted Sentiment =
+DIVIDE (
+    SUMX ( fact_sentiment_daily, fact_sentiment_daily[avg_compound] * fact_sentiment_daily[n_headlines] ),
+    [Headlines]
+)
+
+Positive Share =
+DIVIDE ( SUM ( fact_sentiment_daily[n_positive] ), [Headlines] )
+
+Negative Share =
+DIVIDE ( SUM ( fact_sentiment_daily[n_negative] ), [Headlines] )
+
+Avg Return Same Day = AVERAGE ( fact_sentiment_daily[ret_same] )
+
+Avg Return Next Day = AVERAGE ( fact_sentiment_daily[ret_next] )
+
+Avg Abnormal Return Next Day = AVERAGE ( fact_sentiment_daily[abn_next] )
+
+Avg Next Day Return Positive Days =
+CALCULATE ( [Avg Return Next Day], fact_sentiment_daily[day_label] = "positive" )
+
+Avg Next Day Return Negative Days =
+CALCULATE ( [Avg Return Next Day], fact_sentiment_daily[day_label] = "negative" )
+
+Positive Minus Negative Next Day =
+[Avg Next Day Return Positive Days] - [Avg Next Day Return Negative Days]
+
+// Share of non neutral days where the sentiment sign matches the next day return sign.
+Direction Hit Rate Next Day =
+VAR d =
+    FILTER (
+        fact_sentiment_daily,
+        fact_sentiment_daily[day_label] <> "neutral"
+            && NOT ISBLANK ( fact_sentiment_daily[ret_next] )
+            && fact_sentiment_daily[ret_next] <> 0
+    )
+VAR hits =
+    COUNTROWS (
+        FILTER ( d, SIGN ( fact_sentiment_daily[avg_compound] ) = SIGN ( fact_sentiment_daily[ret_next] ) )
+    )
+RETURN
+    DIVIDE ( hits, COUNTROWS ( d ) )
+
+// Pearson correlation of daily sentiment with next day return, in the current filter context.
+Corr Sentiment Next Day =
+VAR t =
+    FILTER ( fact_sentiment_daily, NOT ISBLANK ( fact_sentiment_daily[ret_next] ) )
+VAR n = COUNTROWS ( t )
+VAR mx = AVERAGEX ( t, fact_sentiment_daily[avg_compound] )
+VAR my = AVERAGEX ( t, fact_sentiment_daily[ret_next] )
+VAR cov = SUMX ( t, ( fact_sentiment_daily[avg_compound] - mx ) * ( fact_sentiment_daily[ret_next] - my ) )
+VAR sx = SQRT ( SUMX ( t, ( fact_sentiment_daily[avg_compound] - mx ) ^ 2 ) )
+VAR sy = SQRT ( SUMX ( t, ( fact_sentiment_daily[ret_next] - my ) ^ 2 ) )
+RETURN
+    IF ( n > 2, DIVIDE ( cov, sx * sy ) )
+
+// Same measure for the news day return.
+Corr Sentiment Same Day =
+VAR t =
+    FILTER ( fact_sentiment_daily, NOT ISBLANK ( fact_sentiment_daily[ret_same] ) )
+VAR n = COUNTROWS ( t )
+VAR mx = AVERAGEX ( t, fact_sentiment_daily[avg_compound] )
+VAR my = AVERAGEX ( t, fact_sentiment_daily[ret_same] )
+VAR cov = SUMX ( t, ( fact_sentiment_daily[avg_compound] - mx ) * ( fact_sentiment_daily[ret_same] - my ) )
+VAR sx = SQRT ( SUMX ( t, ( fact_sentiment_daily[avg_compound] - mx ) ^ 2 ) )
+VAR sy = SQRT ( SUMX ( t, ( fact_sentiment_daily[ret_same] - my ) ^ 2 ) )
+RETURN
+    IF ( n > 2, DIVIDE ( cov, sx * sy ) )
