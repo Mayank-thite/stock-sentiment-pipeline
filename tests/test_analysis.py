@@ -31,3 +31,35 @@ def test_hit_rate_and_baseline():
     assert h["hit_rate"] == 0.5
     # half the days are positive, half the returns are up -> coin flip baseline
     assert h["baseline_if_independent"] == 0.5
+
+
+def _fake_fact(n_dates=150, n_tickers=12, seed=1):
+    import numpy as np
+
+    rng = np.random.default_rng(seed)
+    dates = np.repeat(pd.date_range("2021-01-04", periods=n_dates, freq="B"), n_tickers)
+    df = pd.DataFrame({"trade_date": dates, "ticker": np.tile([f"T{i}" for i in range(n_tickers)], n_dates)})
+    df["avg_compound"] = rng.uniform(-1, 1, len(df))
+    for k in ["prev", "same", "next", "2d"]:
+        df[f"ret_{k}"] = rng.normal(0, 0.02, len(df)) + (0.01 * df["avg_compound"] if k == "same" else 0)
+        df[f"abn_{k}"] = df[f"ret_{k}"] - df.groupby("trade_date")[f"ret_{k}"].transform("mean")
+    df["day_label"] = pd.cut(df["avg_compound"], [-1.01, -0.05, 0.05, 1.01], labels=["negative", "neutral", "positive"])
+    df["day_label"] = df["day_label"].astype(str)
+    df["n_headlines"] = 1
+    return df
+
+
+def test_analyse_end_to_end_on_fake_data():
+    from pipeline.analysis import analyse
+
+    fact = _fake_fact()
+    heads = fact[["ticker", "trade_date", "avg_compound", "day_label"]].rename(
+        columns={"avg_compound": "compound", "day_label": "sentiment_label"})
+    heads["headline_id"] = range(len(heads))
+    res = analyse(fact, heads)
+    assert res["windows"]["same"]["raw"]["t_date"] > 5  # planted effect
+    assert abs(res["windows"]["next"]["raw"]["t_date"]) < 3
+    pt = res["per_ticker"]["ret_next"]
+    assert pt["n_tickers"] == 12
+    assert pt["n_holm_below_0_05"] <= pt["n_p_below_0_05"]
+    assert "loughran_mcdonald" not in res  # no dictionary passed

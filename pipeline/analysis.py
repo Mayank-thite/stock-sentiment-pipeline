@@ -5,24 +5,42 @@ Reads the fact table built by the SQL step and writes:
   outputs/results.md     the same numbers as Markdown tables
   outputs/monthly.csv    monthly sentiment series (used by charts and dashboard)
 
+Ticker days on the same date are not independent, so the headline tests use
+standard errors clustered by date and Fama-MacBeth daily regressions
+(pipeline/inference.py). The plain Pearson CIs are kept only for comparison.
+
 Usage:
   python -m pipeline.analysis [--sample]
 """
+from __future__ import annotations
+
 import argparse
 import json
+import logging
 import math
 
 import numpy as np
 import pandas as pd
 from scipy import stats
 
-from pipeline.config import ROOT, get_paths
+from pipeline import lexicon
+from pipeline.config import FM_MIN_TICKERS_PER_DAY, FM_NEWEY_WEST_LAGS, ROOT, get_paths, setup_logging
+from pipeline.inference import (
+    adjust_pvalues,
+    clustered_mean_diff,
+    clustered_mean_se,
+    clustered_slope,
+    fama_macbeth,
+)
 
-WINDOWS = [
-    ("ret_prev", "Day before (t-1)"),
-    ("ret_same", "News day (t)"),
-    ("ret_next", "Day after (t+1)"),
-]
+log = logging.getLogger(__name__)
+
+WINDOWS = {
+    "prev": "Day before (t-1)",
+    "same": "News day (t)",
+    "next": "Day after (t+1)",
+    "2d": "t and t+1 together",
+}
 MIN_DAYS_PER_TICKER = 100
 
 # Words that usually mean the headline is reporting a price move that already
@@ -36,8 +54,8 @@ MOVE_WORDS = (
 )
 
 
-def pearson_ci(r: float, n: int, z_crit: float = 1.959964):
-    """95% confidence interval for a Pearson r via the Fisher z transform."""
+def pearson_ci(r: float, n: int, z_crit: float = 1.959964) -> tuple[float, float]:
+    """95% CI for a Pearson r via the Fisher z transform. Assumes independent rows."""
     if n <= 3 or not np.isfinite(r):
         return (float("nan"), float("nan"))
     z = math.atanh(max(min(r, 0.999999), -0.999999))
@@ -46,6 +64,7 @@ def pearson_ci(r: float, n: int, z_crit: float = 1.959964):
 
 
 def correlate(x: pd.Series, y: pd.Series) -> dict:
+    """Pearson and Spearman with the naive (independent rows) CI."""
     ok = x.notna() & y.notna()
     x, y = x[ok], y[ok]
     n = int(ok.sum())
@@ -62,30 +81,37 @@ def correlate(x: pd.Series, y: pd.Series) -> dict:
     }
 
 
-def bucket_table(fact: pd.DataFrame) -> list:
+def bucket_table(fact: pd.DataFrame) -> list[dict]:
     rows = []
     for lab in ["negative", "neutral", "positive"]:
         g = fact[fact["day_label"] == lab]
         row = {"day_label": lab, "n_days": int(len(g))}
-        for col in ["ret_same", "ret_next", "abn_same", "abn_next"]:
+        for col in ["ret_same", "ret_next", "ret_2d", "abn_same", "abn_next"]:
             v = g[col].dropna()
             row[f"mean_{col}"] = float(v.mean())
             row[f"se_{col}"] = float(v.std(ddof=1) / math.sqrt(len(v))) if len(v) > 1 else float("nan")
+            row[f"se_date_{col}"] = clustered_mean_se(g[col], g["trade_date"])
             row[f"n_{col}"] = int(len(v))
         rows.append(row)
     return rows
 
 
 def pos_vs_neg(fact: pd.DataFrame, col: str) -> dict:
-    a = fact.loc[fact["day_label"] == "positive", col].dropna()
-    b = fact.loc[fact["day_label"] == "negative", col].dropna()
+    """Positive days minus negative days: Welch t (naive) and date clustered t."""
+    d = fact[fact["day_label"].isin(["positive", "negative"])]
+    a = d.loc[d["day_label"] == "positive", col].dropna()
+    b = d.loc[d["day_label"] == "negative", col].dropna()
     t, p = stats.ttest_ind(a, b, equal_var=False)
+    cl = clustered_mean_diff(d, d["day_label"] == "positive", col)
     return {
         "mean_positive": float(a.mean()),
         "mean_negative": float(b.mean()),
         "difference": float(a.mean() - b.mean()),
         "welch_t": float(t),
-        "p_value": float(p),
+        "welch_p": float(p),
+        "t_date_clustered": cl["t_date"],
+        "p_date_clustered": cl["p_date"],
+        "ci95_date_clustered": cl["ci95_date"],
         "n_positive": int(len(a)),
         "n_negative": int(len(b)),
     }
@@ -109,11 +135,12 @@ def hit_rate(fact: pd.DataFrame, col: str) -> dict:
             "baseline_if_independent": baseline}
 
 
-def by_year(fact: pd.DataFrame) -> list:
-    """Correlation per calendar year, a rough check that one period is not driving the pooled result."""
+def by_year(fact: pd.DataFrame) -> list[dict]:
+    """Correlation per calendar year, with a date clustered t for the news day."""
     rows = []
     for year, g in fact.groupby(fact["trade_date"].dt.year):
-        row = {"year": int(year), "n": int(len(g))}
+        cl = clustered_slope(g, "avg_compound", "ret_same")
+        row = {"year": int(year), "n": int(len(g)), "t_ret_same_date": cl["t_date"]}
         for col in ["ret_same", "ret_next", "abn_next"]:
             ok = g[col].notna()
             row[f"r_{col}"] = float(stats.pearsonr(g.loc[ok, "avg_compound"], g.loc[ok, col])[0])
@@ -121,7 +148,8 @@ def by_year(fact: pd.DataFrame) -> list:
     return rows
 
 
-def per_ticker(fact: pd.DataFrame, col: str = "ret_next") -> dict:
+def per_ticker(fact: pd.DataFrame, col: str) -> dict:
+    """One time series correlation per ticker, then Holm and BH corrections across tickers."""
     rows = []
     for tic, g in fact.groupby("ticker"):
         g = g[g[col].notna()]
@@ -132,17 +160,21 @@ def per_ticker(fact: pd.DataFrame, col: str = "ret_next") -> dict:
     df = pd.DataFrame(rows)
     if df.empty:
         return {"n_tickers": 0, "rows": []}
+    df = pd.concat([df, adjust_pvalues(df["p"])], axis=1)
     return {
         "min_days": MIN_DAYS_PER_TICKER,
         "n_tickers": int(len(df)),
         "median_r": float(df["r"].median()),
         "share_positive_r": float((df["r"] > 0).mean()),
         "n_p_below_0_05": int((df["p"] < 0.05).sum()),
+        "expected_by_chance": float(0.05 * len(df)),
+        "n_holm_below_0_05": int((df["p_holm"] < 0.05).sum()),
+        "n_bh_below_0_05": int((df["p_bh"] < 0.05).sum()),
         "rows": df.sort_values("r").to_dict("records"),
     }
 
 
-def monthly(fact: pd.DataFrame, headlines: pd.DataFrame) -> pd.DataFrame:
+def monthly(headlines: pd.DataFrame) -> pd.DataFrame:
     h = headlines.copy()
     h["month"] = pd.to_datetime(h["trade_date"]).dt.to_period("M").astype(str)
     m = h.groupby("month").agg(
@@ -155,59 +187,120 @@ def monthly(fact: pd.DataFrame, headlines: pd.DataFrame) -> pd.DataFrame:
 
 
 def move_word_check(fact: pd.DataFrame, headlines: pd.DataFrame) -> dict:
-    """News day correlation with and without days that have a move word headline."""
+    """News day link with and without days that have a move word headline."""
     h = headlines.copy()
     h["has_move_word"] = h["headline"].str.contains(MOVE_WORDS, case=False, regex=True, na=False)
     flagged = h.groupby(["ticker", "trade_date"])["has_move_word"].any().rename("day_has_move_word").reset_index()
-    flagged["trade_date"] = pd.to_datetime(flagged["trade_date"])
     f = fact.merge(flagged, on=["ticker", "trade_date"], how="left")
-    clean = f[f["day_has_move_word"] == False]  # noqa: E712
+    clean = f[f["day_has_move_word"].eq(False)]
     return {
         "share_headlines_with_move_word": float(h["has_move_word"].mean()),
         "days_without_move_word": int(len(clean)),
-        "ret_same_without_move_word": correlate(clean["avg_compound"], clean["ret_same"]),
-        "ret_next_without_move_word": correlate(clean["avg_compound"], clean["ret_next"]),
+        "ret_same_without_move_word": clustered_slope(clean, "avg_compound", "ret_same"),
+        "abn_same_without_move_word": clustered_slope(clean, "avg_compound", "abn_same"),
+        "ret_next_without_move_word": clustered_slope(clean, "avg_compound", "ret_next"),
     }
 
 
-def analyse(fact: pd.DataFrame, headlines: pd.DataFrame) -> dict:
+def window_tests(fact: pd.DataFrame, x: str) -> dict:
+    """Clustered slope for raw and market adjusted returns, plus Fama-MacBeth, per window."""
+    out = {}
+    for k in WINDOWS:
+        out[k] = {
+            "raw": clustered_slope(fact, x, f"ret_{k}"),
+            "abnormal": clustered_slope(fact, x, f"abn_{k}"),
+            "fama_macbeth": fama_macbeth(fact, x, f"ret_{k}", min_obs=FM_MIN_TICKERS_PER_DAY,
+                                         nw_lags=FM_NEWEY_WEST_LAGS),
+        }
+    return out
+
+
+def lm_comparison(fact: pd.DataFrame, headlines: pd.DataFrame, lists: lexicon.WordLists) -> dict:
+    """Same tests as VADER, with the Loughran-McDonald tone in its place."""
+    h = lexicon.add_lm_scores(headlines, lists)
+    daily = h.groupby(["ticker", "trade_date"], as_index=False)["lm_tone"].mean()
+    f = fact.merge(daily, on=["ticker", "trade_date"], how="inner")
+    return {
+        "agreement": lexicon.label_agreement(h),
+        "headline_labels": {k: int(v) for k, v in h["lm_label"].value_counts().items()},
+        "windows": window_tests(f, "lm_tone"),
+    }
+
+
+def analyse(fact: pd.DataFrame, headlines: pd.DataFrame, lists: lexicon.WordLists | None = None) -> dict:
     fact = fact.copy()
+    headlines = headlines.copy()
     fact["trade_date"] = pd.to_datetime(fact["trade_date"])
+    headlines["trade_date"] = pd.to_datetime(headlines["trade_date"])
     label_counts = headlines["sentiment_label"].value_counts().to_dict()
     res = {
         "sample": {
             "fact_rows": int(len(fact)),
             "tickers": int(fact["ticker"].nunique()),
+            "trading_dates": int(fact["trade_date"].nunique()),
+            "median_tickers_per_date": float(fact.groupby("trade_date").size().median()),
             "headlines_in_fact": int(fact["n_headlines"].sum()),
+            "headlines_matched": int(len(headlines)),
             "first_date": fact["trade_date"].min().strftime("%Y-%m-%d"),
             "last_date": fact["trade_date"].max().strftime("%Y-%m-%d"),
             "mean_headlines_per_row": float(fact["n_headlines"].mean()),
             "headline_labels": {k: int(v) for k, v in label_counts.items()},
             "mean_compound_headline": float(headlines["compound"].mean()),
         },
-        "correlations": {},
-        "correlations_abnormal": {},
+        "correlations_naive": {},
+        "correlations_abnormal_naive": {},
     }
-    for col, _ in WINDOWS:
-        res["correlations"][col] = correlate(fact["avg_compound"], fact[col])
-        abn = col.replace("ret_", "abn_")
-        res["correlations_abnormal"][abn] = correlate(fact["avg_compound"], fact[abn])
+    for k in WINDOWS:
+        res["correlations_naive"][f"ret_{k}"] = correlate(fact["avg_compound"], fact[f"ret_{k}"])
+        res["correlations_abnormal_naive"][f"abn_{k}"] = correlate(fact["avg_compound"], fact[f"abn_{k}"])
+    res["windows"] = window_tests(fact, "avg_compound")
     res["buckets"] = bucket_table(fact)
-    res["pos_vs_neg"] = {c: pos_vs_neg(fact, c) for c in ["ret_same", "ret_next", "abn_next"]}
+    res["pos_vs_neg"] = {c: pos_vs_neg(fact, c) for c in ["ret_same", "ret_next", "ret_2d", "abn_same", "abn_next"]}
     res["hit_rate"] = {c: hit_rate(fact, c) for c in ["ret_same", "ret_next"]}
-    res["per_ticker_next"] = per_ticker(fact, "ret_next")
+    res["per_ticker"] = {c: per_ticker(fact, c) for c in ["ret_same", "ret_next"]}
     res["by_year"] = by_year(fact)
     if "headline" in headlines.columns:
         res["move_words"] = move_word_check(fact, headlines)
+    res["phrase_check"] = lexicon.phrase_check(lists)
+    if lists is not None and "headline" in headlines.columns:
+        res["loughran_mcdonald"] = lm_comparison(fact, headlines, lists)
     return res
 
 
-def fmt(x, d=4):
+def fmt(x: float | None, d: int = 4) -> str:
     return "nan" if x is None or (isinstance(x, float) and not np.isfinite(x)) else f"{x:.{d}f}"
 
 
-def fmt_p(p):
+def fmt_p(p: float) -> str:
     return "<0.0001" if np.isfinite(p) and p < 1e-4 else fmt(p, 4)
+
+
+def _ci(c: list[float]) -> str:
+    return f"[{fmt(c[0])}, {fmt(c[1])}]"
+
+
+def _window_table(windows: dict) -> list[str]:
+    lines = [
+        "| Window | Return | n | r | 95% CI, date clustered | t naive | t date clustered | t date and ticker |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for k, w in windows.items():
+        for kind in ["raw", "abnormal"]:
+            c = w[kind]
+            lines.append(
+                f"| {WINDOWS[k]} | {kind} | {c['n']} | {fmt(c['r'])} | {_ci(c['ci95_date'])} | "
+                f"{fmt(c['t_iid'], 2)} | {fmt(c['t_date'], 2)} | {fmt(c['t_date_ticker'], 2)} |"
+            )
+    lines += ["", "Fama-MacBeth: one cross sectional slope per date (return on compound), "
+              "then a Newey-West t on the daily slopes.", "",
+              "| Window | Dates | Mean slope (pct points per unit compound) | t simple | t Newey-West | p |",
+              "|---|---|---|---|---|---|"]
+    for k, w in windows.items():
+        fm = w["fama_macbeth"]
+        if "mean_slope" in fm:
+            lines.append(f"| {WINDOWS[k]} | {fm['n_dates']} | {fmt(100 * fm['mean_slope'], 3)} | "
+                         f"{fmt(fm['t_simple'], 2)} | {fmt(fm['t_newey_west'], 2)} | {fmt_p(fm['p_newey_west'])} |")
+    return lines
 
 
 def to_markdown(res: dict) -> str:
@@ -219,53 +312,68 @@ def to_markdown(res: dict) -> str:
         "",
         f"- Ticker days with news and returns: {s['fact_rows']}",
         f"- Tickers: {s['tickers']}",
-        f"- Headlines in those rows: {s['headlines_in_fact']}",
+        f"- Trading dates: {s['trading_dates']} (median {fmt(s['median_tickers_per_date'], 0)} tickers per date)",
+        f"- Headlines in those rows: {s['headlines_in_fact']} of {s['headlines_matched']} matched to a trading day",
         f"- Date range: {s['first_date']} to {s['last_date']}",
         f"- Headline labels: {s['headline_labels']}",
         f"- Raw headlines scored: {s.get('raw_headlines')}",
         f"- Share of raw timestamps at exactly 00:00:00 (no time of day): {fmt(s.get('share_timestamp_midnight'), 4)}",
         "",
-        "## Correlation of daily average sentiment with returns",
+        "## Sentiment vs returns, with errors that allow for same date correlation",
         "",
-        "| Window | Return | n | Pearson r | 95% CI | p | Spearman rho | p |",
-        "|---|---|---|---|---|---|---|---|",
+        "r is the slope of standardised return on standardised daily VADER compound, which equals the Pearson r.",
+        "",
     ]
-    for kind, block in [("raw", res["correlations"]), ("abnormal", res["correlations_abnormal"])]:
+    lines += _window_table(res["windows"])
+    lines += ["", "## Naive Pearson and Spearman (treat every ticker day as independent)", "",
+              "| Window | n | Pearson r | 95% CI naive | p naive | Spearman rho |", "|---|---|---|---|---|---|"]
+    for block in [res["correlations_naive"], res["correlations_abnormal_naive"]]:
         for col, c in block.items():
-            lines.append(
-                f"| {col} | {kind} | {c['n']} | {fmt(c['pearson_r'])} | "
-                f"[{fmt(c['pearson_ci95'][0])}, {fmt(c['pearson_ci95'][1])}] | {fmt_p(c['pearson_p'])} | "
-                f"{fmt(c['spearman_rho'])} | {fmt_p(c['spearman_p'])} |"
-            )
-    lines += [
-        "",
-        "## Mean return by day label (percent)",
-        "",
-        "| Day label | Days | News day | Day after | Day after, abnormal |",
-        "|---|---|---|---|---|",
-    ]
+            lines.append(f"| {col} | {c['n']} | {fmt(c['pearson_r'])} | {_ci(c['pearson_ci95'])} | "
+                         f"{fmt_p(c['pearson_p'])} | {fmt(c['spearman_rho'])} |")
+    lines += ["", "## Mean return by day label (percent)", "",
+              "| Day label | Days | News day | Day after | t and t+1 | Day after, abnormal |", "|---|---|---|---|---|---|"]
     for b in res["buckets"]:
         lines.append(
             f"| {b['day_label']} | {b['n_days']} | {fmt(100 * b['mean_ret_same'], 3)} | "
-            f"{fmt(100 * b['mean_ret_next'], 3)} | {fmt(100 * b['mean_abn_next'], 3)} |"
+            f"{fmt(100 * b['mean_ret_next'], 3)} | {fmt(100 * b['mean_ret_2d'], 3)} | {fmt(100 * b['mean_abn_next'], 3)} |"
         )
-    lines += ["", "## Positive days minus negative days (Welch t test)", "",
-              "| Return | Difference (pct points) | t | p | n pos | n neg |", "|---|---|---|---|---|---|"]
+    lines += ["", "## Positive days minus negative days", "",
+              "| Return | Difference (pct points) | 95% CI, date clustered | Welch t | t date clustered | p date clustered |",
+              "|---|---|---|---|---|---|"]
     for col, t in res["pos_vs_neg"].items():
+        ci = [100 * v for v in t["ci95_date_clustered"]]
         lines.append(
-            f"| {col} | {fmt(100 * t['difference'], 3)} | {fmt(t['welch_t'], 2)} | {fmt_p(t['p_value'])} | "
-            f"{t['n_positive']} | {t['n_negative']} |"
+            f"| {col} | {fmt(100 * t['difference'], 3)} | [{fmt(ci[0], 3)}, {fmt(ci[1], 3)}] | {fmt(t['welch_t'], 2)} | "
+            f"{fmt(t['t_date_clustered'], 2)} | {fmt_p(t['p_date_clustered'])} |"
         )
     lines += ["", "## Direction hit rate (non neutral days)", "",
               "Baseline is the hit rate you would expect if sentiment and returns were unrelated, "
               "given how often days are positive and how often stocks rise.", "",
-              "| Return | n | Hit rate | Baseline if unrelated | Binomial p vs 0.5 |", "|---|---|---|---|---|"]
+              "| Return | n | Hit rate | Baseline if unrelated |", "|---|---|---|---|"]
     for col, h in res["hit_rate"].items():
-        lines.append(f"| {col} | {h['n']} | {fmt(h['hit_rate'], 4)} | {fmt(h['baseline_if_independent'], 4)} | "
-                     f"{fmt_p(h['binom_p_vs_half'])} |")
-    lines += ["", "## Pearson r by year", "", "| Year | n | News day | Day after | Day after, abnormal |", "|---|---|---|---|---|"]
+        lines.append(f"| {col} | {h['n']} | {fmt(h['hit_rate'], 4)} | {fmt(h['baseline_if_independent'], 4)} |")
+    lines += ["", "## By year", "",
+              "| Year | n | r news day | t news day, date clustered | r day after | r day after, abnormal |",
+              "|---|---|---|---|---|---|"]
     for r in res["by_year"]:
-        lines.append(f"| {r['year']} | {r['n']} | {fmt(r['r_ret_same'])} | {fmt(r['r_ret_next'])} | {fmt(r['r_abn_next'])} |")
+        lines.append(f"| {r['year']} | {r['n']} | {fmt(r['r_ret_same'])} | {fmt(r['t_ret_same_date'], 2)} | "
+                     f"{fmt(r['r_ret_next'])} | {fmt(r['r_abn_next'])} |")
+    for col, pt in res["per_ticker"].items():
+        if not pt["n_tickers"]:
+            continue
+        lines += [
+            "",
+            f"## Per ticker correlation with {col} (tickers with at least {pt['min_days']} days)",
+            "",
+            f"- Tickers: {pt['n_tickers']}",
+            f"- Median r: {fmt(pt['median_r'])}",
+            f"- Share with r above 0: {fmt(pt['share_positive_r'], 3)}",
+            f"- p below 0.05 before correction: {pt['n_p_below_0_05']} (chance alone gives about "
+            f"{fmt(pt['expected_by_chance'], 1)})",
+            f"- Below 0.05 after Holm: {pt['n_holm_below_0_05']}",
+            f"- Below 0.05 after Benjamini-Hochberg: {pt['n_bh_below_0_05']}",
+        ]
     mw = res.get("move_words")
     if mw:
         a, b = mw["ret_same_without_move_word"], mw["ret_next_without_move_word"]
@@ -276,22 +384,25 @@ def to_markdown(res: dict) -> str:
             f"- Share of headlines with a move word (soar, jump, fall, up, down and so on): "
             f"{fmt(mw['share_headlines_with_move_word'], 4)}",
             f"- Ticker days with no move word headline: {mw['days_without_move_word']}",
-            f"- News day r on those days: {fmt(a['pearson_r'])} "
-            f"[{fmt(a['pearson_ci95'][0])}, {fmt(a['pearson_ci95'][1])}], n={a['n']}",
-            f"- Day after r on those days: {fmt(b['pearson_r'])} "
-            f"[{fmt(b['pearson_ci95'][0])}, {fmt(b['pearson_ci95'][1])}], n={b['n']}",
+            f"- News day r on those days: {fmt(a['r'])} {_ci(a['ci95_date'])} date clustered, t = {fmt(a['t_date'], 2)}",
+            f"- Day after r on those days: {fmt(b['r'])} {_ci(b['ci95_date'])} date clustered, t = {fmt(b['t_date'], 2)}",
         ]
-    pt = res["per_ticker_next"]
-    if pt["n_tickers"]:
-        lines += [
-            "",
-            f"## Per ticker correlation with next day return (tickers with at least {pt['min_days']} days)",
-            "",
-            f"- Tickers: {pt['n_tickers']}",
-            f"- Median r: {fmt(pt['median_r'])}",
-            f"- Share with r above 0: {fmt(pt['share_positive_r'], 3)}",
-            f"- Tickers with p below 0.05: {pt['n_p_below_0_05']}",
-        ]
+    pc = res["phrase_check"]
+    lines += ["", f"## Finance phrase check ({pc['n']} hand labelled phrases)", "",
+              f"- VADER accuracy: {fmt(pc['vader_accuracy'], 3)}",
+              f"- Loughran-McDonald accuracy: {fmt(pc.get('lm_accuracy'), 3)}", "",
+              "| Phrase | My label | VADER | LM |", "|---|---|---|---|"]
+    for r in pc["rows"]:
+        lines.append(f"| {r['phrase']} | {r['expected']} | {r['vader']} | {r.get('lm', 'n/a')} |")
+    lm = res.get("loughran_mcdonald")
+    if lm:
+        ag = lm["agreement"]
+        lines += ["", "## Loughran-McDonald instead of VADER", "",
+                  f"- Same label as VADER: {fmt(ag['share_same_label'], 4)}",
+                  f"- Correlation of VADER compound with LM tone, per headline: {fmt(ag['pearson_compound_vs_lm_tone'], 4)}",
+                  f"- Share of headlines LM calls neutral (no LM word): {fmt(ag['share_lm_neutral'], 4)}",
+                  f"- LM headline labels: {lm['headline_labels']}", ""]
+        lines += _window_table(lm["windows"])
     return "\n".join(lines) + "\n"
 
 
@@ -299,7 +410,7 @@ def run(sample: bool) -> dict:
     paths = get_paths(sample)
     fact = pd.read_parquet(paths.work / "fact_sentiment_daily.parquet")
     headlines = pd.read_parquet(paths.work / "headline_trading_day.parquet")
-    res = analyse(fact, headlines)
+    res = analyse(fact, headlines, lexicon.load_word_lists())
     raw = pd.read_parquet(paths.warehouse / "headline_scores", columns=["published_at"])
     res["sample"]["raw_headlines"] = int(len(raw))
     res["sample"]["share_timestamp_midnight"] = float(raw["published_at"].str.endswith("00:00:00").mean())
@@ -308,17 +419,18 @@ def run(sample: bool) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     (out / "results.json").write_text(json.dumps(res, indent=2))
     (out / "results.md").write_text(to_markdown(res))
-    monthly(fact, headlines).to_csv(out / "monthly.csv", index=False)
-    c = res["correlations"]
-    print(
-        f"analysis: n={res['sample']['fact_rows']} "
-        f"r(t-1)={c['ret_prev']['pearson_r']:.4f} r(t)={c['ret_same']['pearson_r']:.4f} "
-        f"r(t+1)={c['ret_next']['pearson_r']:.4f}  -> {out / 'results.md'}"
+    monthly(headlines).to_csv(out / "monthly.csv", index=False)
+    w = res["windows"]
+    log.info(
+        "n=%d  r(t)=%.4f t_date=%.2f  r(t+1)=%.4f t_date=%.2f  -> %s",
+        res["sample"]["fact_rows"], w["same"]["raw"]["r"], w["same"]["raw"]["t_date"],
+        w["next"]["raw"]["r"], w["next"]["raw"]["t_date"], out / "results.md",
     )
     return res
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    setup_logging()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--sample", action="store_true")
     args = ap.parse_args(argv)
