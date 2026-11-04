@@ -82,6 +82,10 @@ docker compose down -v
 
 Spark pulls the Kafka connector (`spark-sql-kafka-0-10_2.13:4.0.1`) from Maven Central on the first Kafka run. Both modes stop when the stream is drained (`trigger(availableNow=True)`). Remove that trigger in `stream_score.py` for an always on job.
 
+The full run uses the topic `headlines` and the sample run uses `headlines_sample`. Spark reads each topic from the earliest offset, so a second run reads old messages again. The dedupe step in `sql/02_clean_headlines.sql` removes those repeats, so the results stay the same.
+
+I tested the Kafka mode against a plain Kafka 3.9.0 broker started from the Apache tarball, because the machine I built this on had no Docker daemon. The results matched the local mode exactly. The `docker-compose.yml` uses the same Kafka version and settings, but I have not run it.
+
 ### Optional: prices from a public API
 
 ```bash
@@ -133,6 +137,8 @@ On the news day, positive days beat negative days by 0.583 percentage points (We
 **By year.** The news day link is strongest in 2019 (r = 0.0993) and 2020 (0.1561) and much weaker from 2021 to 2023 (0.0242, 0.0272, 0.0200). The day after r stays between -0.0184 and -0.0003 in every year.
 
 **Per ticker.** For the 77 tickers with at least 100 news days, the median r with the next day return is -0.0220. 4 of 77 have p below 0.05, which is about what chance alone would give.
+
+![Per ticker correlation](docs/img/per_ticker_correlation.png)
 
 **Headlines that describe a move.** 0.1155 of headlines contain words like soar, jump, fall, up or down. Dropping every ticker day with such a headline leaves 41,884 days, and the news day r is still 0.0714 [0.0619, 0.0809]. So the news day link is not only explicit "stock jumps" headlines.
 
