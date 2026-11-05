@@ -238,6 +238,13 @@ outputs/         results.md, results.json, monthly.csv, price_check.json, powerb
 docs/            charts, dashboard.html, powerbi.md
 ```
 
+## Problems I ran into
+
+- **Stocks move together.** My first tests treated every ticker day as independent, but stocks on the same date share market news. With standard errors clustered by date, the positive minus negative gap went from t = 12.96 to t = 6.27. It still holds, at about half the strength.
+- **The lexicon misread finance headlines.** VADER scores "shares" as positive, so "Tesla shares fall" came out positive. I removed those two words and compared against the Loughran-McDonald finance word list, which gives the same shape of result.
+- **No time of day.** 99.44% of timestamps are exactly midnight, so I can't tell if a headline came before or after the close. I report the same day and the day after together, and I don't claim news moves prices.
+- **Chance hits per ticker.** 2 of 77 tickers looked significant the day after, which is about what chance gives. After a Holm correction, none remain. Chance alone gives about 4.
+
 ## License
 
 The code is MIT, see `LICENSE`. That covers the code only. The headlines (including the sample in `data/sample/`) are FNSPID data under CC BY-NC 4.0, the Loughran-McDonald dictionary is free for academic use only and is never committed, and the price data keeps the terms of its source. If you reuse this, check those terms first.
