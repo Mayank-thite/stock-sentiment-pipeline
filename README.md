@@ -1,4 +1,25 @@
-# Stock Sentiment Pipeline
+<div align="center">
+
+<img src="docs/img/banner.svg" alt="Stock Sentiment Pipeline" width="100%">
+
+62,000 NASDAQ-100 headlines streamed through Kafka and Spark, scored for tone,<br>joined to daily prices, and tested with statistics that don't fool themselves.
+
+[![CI](https://github.com/Mayank-thite/stock-sentiment-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/Mayank-thite/stock-sentiment-pipeline/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![Apache Kafka](https://img.shields.io/badge/Apache%20Kafka-streaming-231F20?logo=apachekafka&logoColor=white)
+![Apache Spark](https://img.shields.io/badge/Apache%20Spark-Structured%20Streaming-E25A1C?logo=apachespark&logoColor=white)
+![HiveQL](https://img.shields.io/badge/HiveQL-SQL-FDEE21?logo=apachehive&logoColor=white)
+![Power BI](https://img.shields.io/badge/Power%20BI-ready-F2C811?logo=powerbi&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-F7DF1E)
+
+![Headlines scored](https://img.shields.io/badge/Headlines%20scored-61%2C827-15803D)
+![News day link](https://img.shields.io/badge/News%20day%20link-r%20%3D%200.044%2C%20t%20%3D%208.25-16A34A)
+![Next day link](https://img.shields.io/badge/Next%20day%20link-none%20%28r%20%3D%200.001%29-DC2626)
+[![Live dashboard](https://img.shields.io/badge/Live%20dashboard-open-0F172A?logo=githubpages&logoColor=white)](https://mayank-thite.github.io/stock-sentiment-pipeline/dashboard.html)
+
+[**Data**](#-data) · [**Architecture**](#-architecture) · [**How to run**](#-how-to-run) · [**Results**](#-results) · [**Limitations**](#-limitations) · [**Dashboard**](#-dashboard) · [**Technical details**](#-technical-details) · [**Problems I ran into**](#-problems-i-ran-into)
+
+</div>
 
 Rebuilt in 2026 on public data. The original 2024 version was a team project at Conestoga College.
 
@@ -6,11 +27,12 @@ I wanted to answer one question. When news headlines about a stock turn positive
 
 This repo streams about 62,000 public NASDAQ-100 headlines through Kafka (or a local folder), scores each one with VADER in Spark Structured Streaming, cleans and joins them to daily prices with HiveQL, and tests the link with statistics that allow for the fact that stocks on the same date move together. It also exports a star schema for Power BI and a one page HTML dashboard.
 
-Short answer: on the news day, a more positive headline goes with a higher return than the rest of the market (r = 0.044, date clustered t = 8.25). On the day after there is nothing (r = 0.001, t = 0.16). Because the data has dates but no times, I can't say the news came first.
+> [!NOTE]
+> Short answer: on the news day, a more positive headline goes with a higher return than the rest of the market (r = 0.044, date clustered t = 8.25). On the day after there is nothing (r = 0.001, t = 0.16). Because the data has dates but no times, I can't say the news came first.
 
 ![Correlation by window](docs/img/correlation_by_window.png)
 
-## Data
+## 🧾 Data
 
 All data is public. The code in this repo is MIT. The data is not, and it keeps its own terms:
 
@@ -28,9 +50,10 @@ What is committed and what is not:
 - `data/checks/finance_phrases.csv` is 30 short phrases I wrote and labelled myself for a smell test of the two lexicons.
 - `outputs/` holds numbers and the Power BI tables I built. The fact table has scores and returns but no headline text.
 
-So this repo is for learning and portfolio use, not for anything commercial.
+> [!IMPORTANT]
+> So this repo is for learning and portfolio use, not for anything commercial.
 
-## Architecture
+## 🧱 Architecture
 
 ```mermaid
 flowchart LR
@@ -48,6 +71,7 @@ flowchart LR
     F --> AN[analysis.py + inference.py<br>results.json / results.md]
     F --> PB[Power BI star schema<br>outputs/powerbi]
     AN --> C[PNG charts and<br>docs/dashboard.html]
+classDef default fill:#dcfce7,stroke:#16a34a,color:#14532d
 ```
 
 | Step | File | What it does |
@@ -61,7 +85,7 @@ flowchart LR
 
 The SQL runs in Spark with Hive support and a local Derby metastore, so the same files would run in Hive.
 
-## How to run
+## 🚀 How to run
 
 You need Python 3.10 to 3.13 and Java 17. No Docker needed for the local mode.
 
@@ -110,24 +134,7 @@ make prices-api                                  # fetch, cache, and compare wit
 
 When I ran it, 80 of 84 tickers came back from the API. ANSS, EA, WBA and WBD failed (delisted or renamed) and used the static rows. On the 100,480 matched ticker days, the API daily returns had a correlation of 0.9999 with the static file, and 0.9997 of them were within 1 basis point (`outputs/price_check.json`). So the static file is a faithful copy, and the main results use it so runs are reproducible.
 
-## Method
-
-**Sentiment.** VADER compound score per headline, from -1 to 1. A headline is positive at 0.05 or above, negative at -0.05 or below, neutral in between. VADER is a lexicon model built for social media. It runs on CPU in seconds and needs no API. I made one change to it: VADER scores "share" and "shares" as positive (+1.2), so "Tesla shares fall after delivery numbers" came out positive. In headlines that word is a noun, and 4.4% of headlines contain "shares", so I removed both entries.
-
-**Trading day.** 99.44% of the raw timestamps are exactly midnight, so the data has dates, not times. Each headline goes to the first trading day on or after its date, so a Saturday headline counts for Monday. This matters a lot for how to read the results. A headline dated t could have come out before the open (and moved the price on t), during the day, or after the close (and moved the price on t+1). I can't tell which. That is why I also test t and t+1 together as one two day window.
-
-**Daily fact.** One row per ticker per trading day with at least one headline. The day's sentiment is the average compound score.
-
-**Returns.** Simple close to close returns on adjusted closes. `ret_prev` is the day before the news day, `ret_same` the news day, `ret_next` the day after, `ret_2d` is close(t-1) to close(t+1). The `abn_` versions subtract the equal weighted average return of all tickers that day, which takes out most market wide moves.
-
-**Inference.** This is the part I got wrong in the first version. On a day like a Fed decision, most of the 79 tickers move together and most of their headlines turn the same way. Plain t tests count each of those ticker days as independent evidence. The median date has 39 ticker days in it, so that overstates the evidence a lot. Now every main test uses one of these, from `pipeline/inference.py`:
-
-- Pooled OLS of standardised return on standardised sentiment, with standard errors clustered by date (and a second version clustered by date and ticker). With both sides standardised the slope is exactly the Pearson r, so the CI is a CI for r.
-- Fama-MacBeth: one cross sectional regression per date (dates with at least 10 tickers), then a t test on the 1,249 daily slopes with Newey-West errors (5 lags). This one can't be driven by market wide days at all, because each day is compared only with itself.
-
-The old naive numbers are still in `outputs/results.md` next to the new ones, so you can see the difference.
-
-## Results
+## 📊 Results
 
 Every number here comes from `outputs/results.md` and `outputs/results.json`, written by `python -m pipeline.analysis` on the full data.
 
@@ -189,9 +196,10 @@ Headline tone and price move together on the same day, and that survives cluster
 
 Headline tone does not help predict the next day. Every version of the next day test is close to zero, and no single ticker survives a multiple testing correction.
 
-The same day link is not evidence that news moves prices. Without publish times I can't tell if a headline came before or after the move, and a lot of financial news is written about moves that already happened.
+> [!WARNING]
+> The same day link is not evidence that news moves prices. Without publish times I can't tell if a headline came before or after the move, and a lot of financial news is written about moves that already happened.
 
-## Limitations
+## 🚧 Limitations
 
 - **No time of day.** 99.44% of timestamps are midnight. "News day" mixes pre market, intraday and after close news. This is the biggest weakness for any timing claim, and it is why the honest reading is "same day or the day after" rather than "news day".
 - **One headline per ticker per day.** The subset I used keeps one headline per ticker per day (weekend headlines roll into Monday, so a few days have two or three). The multi headline NASDAQ-100 version of FNSPID is about 825 MB, so I kept the smaller one. With one headline, a day's tone is noisy.
@@ -200,17 +208,47 @@ The same day link is not evidence that news moves prices. Without publish times 
 - **The 2021 to 2023 link is weak.** Most of the pooled news day effect comes from 2019 and 2020.
 - **Not a trading strategy.** No costs, no out of sample test, and the next day effect is zero anyway.
 
-## Power BI
-
-I can't build a .pbix on Linux, so `outputs/powerbi/` has the star schema (`fact_sentiment_daily`, `dim_ticker`, `dim_date`) as Parquet (and CSV for the small tables), plus `measures.dax`. `docs/powerbi.md` explains how to load it and lay out a report. `make powerbi` rebuilds the large fact CSV if you want it.
-
-## Dashboard
+## 📈 Dashboard
 
 ![Dashboard](docs/img/dashboard.png)
 
 `docs/dashboard.html` is a single page with inline SVG and no JavaScript libraries. It only loads the Geist fonts from Google Fonts. It is dark by default and switches to light if your system is set to light. It is rebuilt on every run from `outputs/results.json`.
 
-## Mapping to GCP
+## 🔧 Technical details
+For readers who want the full detail. Click a section to open it.
+
+<details>
+<summary><b>Method</b></summary>
+<br>
+
+**Sentiment.** VADER compound score per headline, from -1 to 1. A headline is positive at 0.05 or above, negative at -0.05 or below, neutral in between. VADER is a lexicon model built for social media. It runs on CPU in seconds and needs no API. I made one change to it: VADER scores "share" and "shares" as positive (+1.2), so "Tesla shares fall after delivery numbers" came out positive. In headlines that word is a noun, and 4.4% of headlines contain "shares", so I removed both entries.
+
+**Trading day.** 99.44% of the raw timestamps are exactly midnight, so the data has dates, not times. Each headline goes to the first trading day on or after its date, so a Saturday headline counts for Monday. This matters a lot for how to read the results. A headline dated t could have come out before the open (and moved the price on t), during the day, or after the close (and moved the price on t+1). I can't tell which. That is why I also test t and t+1 together as one two day window.
+
+**Daily fact.** One row per ticker per trading day with at least one headline. The day's sentiment is the average compound score.
+
+**Returns.** Simple close to close returns on adjusted closes. `ret_prev` is the day before the news day, `ret_same` the news day, `ret_next` the day after, `ret_2d` is close(t-1) to close(t+1). The `abn_` versions subtract the equal weighted average return of all tickers that day, which takes out most market wide moves.
+
+**Inference.** This is the part I got wrong in the first version. On a day like a Fed decision, most of the 79 tickers move together and most of their headlines turn the same way. Plain t tests count each of those ticker days as independent evidence. The median date has 39 ticker days in it, so that overstates the evidence a lot. Now every main test uses one of these, from `pipeline/inference.py`:
+
+- Pooled OLS of standardised return on standardised sentiment, with standard errors clustered by date (and a second version clustered by date and ticker). With both sides standardised the slope is exactly the Pearson r, so the CI is a CI for r.
+- Fama-MacBeth: one cross sectional regression per date (dates with at least 10 tickers), then a t test on the 1,249 daily slopes with Newey-West errors (5 lags). This one can't be driven by market wide days at all, because each day is compared only with itself.
+
+The old naive numbers are still in `outputs/results.md` next to the new ones, so you can see the difference.
+
+</details>
+
+<details>
+<summary><b>Power BI</b></summary>
+<br>
+
+I can't build a .pbix on Linux, so `outputs/powerbi/` has the star schema (`fact_sentiment_daily`, `dim_ticker`, `dim_date`) as Parquet (and CSV for the small tables), plus `measures.dax`. `docs/powerbi.md` explains how to load it and lay out a report. `make powerbi` rebuilds the large fact CSV if you want it.
+
+</details>
+
+<details>
+<summary><b>Mapping to GCP</b></summary>
+<br>
 
 The 2024 version ran on GCP. This rebuild runs on a laptop, but it maps over with config changes, not code changes:
 
@@ -225,7 +263,11 @@ The 2024 version ran on GCP. This rebuild runs on a laptop, but it maps over wit
 
 I did not run any of this on GCP for the rebuild.
 
-## Repo layout
+</details>
+
+<details>
+<summary><b>Repo layout</b></summary>
+<br>
 
 ```
 pipeline/        Python steps (producer, streaming job, SQL runner, analysis, inference, lexicon, charts, exports)
@@ -238,13 +280,15 @@ outputs/         results.md, results.json, monthly.csv, price_check.json, powerb
 docs/            charts, dashboard.html, powerbi.md
 ```
 
-## Problems I ran into
+</details>
+
+## 🐛 Problems I ran into
 
 - **Stocks move together.** My first tests treated every ticker day as independent, but stocks on the same date share market news. With standard errors clustered by date, the positive minus negative gap went from t = 12.96 to t = 6.27. It still holds, at about half the strength.
 - **The lexicon misread finance headlines.** VADER scores "shares" as positive, so "Tesla shares fall" came out positive. I removed those two words and compared against the Loughran-McDonald finance word list, which gives the same shape of result.
 - **No time of day.** 99.44% of timestamps are exactly midnight, so I can't tell if a headline came before or after the close. I report the same day and the day after together, and I don't claim news moves prices.
 - **Chance hits per ticker.** 2 of 77 tickers looked significant the day after, which is about what chance gives. After a Holm correction, none remain. Chance alone gives about 4.
 
-## License
+## 📜 License
 
 The code is MIT, see `LICENSE`. That covers the code only. The headlines (including the sample in `data/sample/`) are FNSPID data under CC BY-NC 4.0, the Loughran-McDonald dictionary is free for academic use only and is never committed, and the price data keeps the terms of its source. If you reuse this, check those terms first.
